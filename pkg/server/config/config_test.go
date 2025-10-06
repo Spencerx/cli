@@ -33,12 +33,7 @@ func TestValidate(t *testing.T) {
 	}{
 		{
 			config: Config{
-				DB: PostgresConfig{
-					Host: "mockHost",
-					Port: "5432",
-					Name: "mockDB",
-					User: "mockUser",
-				},
+				DBPath: "test.db",
 				WebURL: "http://mock.url",
 				Port:   "3000",
 			},
@@ -46,71 +41,21 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			config: Config{
-				DB: PostgresConfig{
-					Port: "5432",
-					Name: "mockDB",
-					User: "mockUser",
-				},
+				DBPath: "",
 				WebURL: "http://mock.url",
 				Port:   "3000",
 			},
-			expectedErr: ErrDBMissingHost,
+			expectedErr: ErrDBMissingPath,
 		},
 		{
 			config: Config{
-				DB: PostgresConfig{
-					Host: "mockHost",
-					Name: "mockDB",
-					User: "mockUser",
-				},
-				WebURL: "http://mock.url",
-				Port:   "3000",
-			},
-			expectedErr: ErrDBMissingPort,
-		},
-		{
-			config: Config{
-				DB: PostgresConfig{
-					Host: "mockHost",
-					Port: "5432",
-					User: "mockUser",
-				},
-				WebURL: "http://mock.url",
-				Port:   "3000",
-			},
-			expectedErr: ErrDBMissingName,
-		},
-		{
-			config: Config{
-				DB: PostgresConfig{
-					Host: "mockHost",
-					Port: "5432",
-					Name: "mockDB",
-				},
-				WebURL: "http://mock.url",
-				Port:   "3000",
-			},
-			expectedErr: ErrDBMissingUser,
-		},
-		{
-			config: Config{
-				DB: PostgresConfig{
-					Host: "mockHost",
-					Port: "5432",
-					Name: "mockDB",
-					User: "mockUser",
-				},
+				DBPath: "test.db",
 			},
 			expectedErr: ErrWebURLInvalid,
 		},
 		{
 			config: Config{
-				DB: PostgresConfig{
-					Host: "mockHost",
-					Port: "5432",
-					Name: "mockDB",
-					User: "mockUser",
-				},
+				DBPath: "test.db",
 				WebURL: "http://mock.url",
 			},
 			expectedErr: ErrPortInvalid,

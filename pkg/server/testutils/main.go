@@ -27,36 +27,44 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
-	// "strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/dnote/dnote/pkg/server/config"
 	"github.com/dnote/dnote/pkg/server/database"
-	"gorm.io/gorm"
+	"github.com/dnote/dnote/pkg/server/helpers"
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
-func init() {
-	rand.Seed(time.Now().UnixNano())
+// InitDB opens a database at the given path and initializes the schema
+func InitDB(dbPath string) *gorm.DB {
+	db := database.Open(dbPath)
+	database.InitSchema(db)
+	database.Migrate(db)
+	return db
 }
 
-// DB is the database connection to a test database
-var DB *gorm.DB
-
-// InitTestDB establishes connection pool with the test database specified by
-// the environment variable configuration and initalizes a new schema
-func InitTestDB() {
-	c := config.Load()
-	fmt.Println(c.DB.GetConnectionStr())
-	db := database.Open(c)
+// InitMemoryDB creates an in-memory SQLite database with the schema initialized
+func InitMemoryDB(t *testing.T) *gorm.DB {
+	// Use file-based in-memory database with unique UUID per test to avoid sharing
+	uuid, err := helpers.GenUUID()
+	if err != nil {
+		t.Fatalf("failed to generate UUID for test database: %v", err)
+	}
+	dbName := fmt.Sprintf("file:%s?mode=memory&cache=shared", uuid)
+	db, err := gorm.Open(sqlite.Open(dbName), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open in-memory database: %v", err)
+	}
 
 	database.InitSchema(db)
+	database.Migrate(db)
 
-	DB = db
+	return db
 }
 
 // ClearData deletes all records from the database
@@ -68,14 +76,8 @@ func ClearData(db *gorm.DB) {
 	if err := db.Where("1 = 1").Delete(&database.Book{}).Error; err != nil {
 		panic(errors.Wrap(err, "Failed to clear books"))
 	}
-	if err := db.Where("1 = 1").Delete(&database.Notification{}).Error; err != nil {
-		panic(errors.Wrap(err, "Failed to clear notifications"))
-	}
 	if err := db.Where("1 = 1").Delete(&database.Token{}).Error; err != nil {
 		panic(errors.Wrap(err, "Failed to clear tokens"))
-	}
-	if err := db.Where("1 = 1").Delete(&database.EmailPreference{}).Error; err != nil {
-		panic(errors.Wrap(err, "Failed to clear email preferences"))
 	}
 	if err := db.Where("1 = 1").Delete(&database.Session{}).Error; err != nil {
 		panic(errors.Wrap(err, "Failed to clear sessions"))
@@ -88,13 +90,27 @@ func ClearData(db *gorm.DB) {
 	}
 }
 
+// MustUUID generates a UUID and fails the test on error
+func MustUUID(t *testing.T) string {
+	uuid, err := helpers.GenUUID()
+	if err != nil {
+		t.Fatal(errors.Wrap(err, "Failed to generate UUID"))
+	}
+	return uuid
+}
+
 // SetupUserData creates and returns a new user for testing purposes
-func SetupUserData() database.User {
-	user := database.User{
-		Cloud: true,
+func SetupUserData(db *gorm.DB) database.User {
+	uuid, err := helpers.GenUUID()
+	if err != nil {
+		panic(errors.Wrap(err, "Failed to generate UUID"))
 	}
 
-	if err := DB.Save(&user).Error; err != nil {
+	user := database.User{
+		UUID: uuid,
+	}
+
+	if err := db.Save(&user).Error; err != nil {
 		panic(errors.Wrap(err, "Failed to prepare user"))
 	}
 
@@ -102,7 +118,7 @@ func SetupUserData() database.User {
 }
 
 // SetupAccountData creates and returns a new account for the user
-func SetupAccountData(user database.User, email, password string) database.Account {
+func SetupAccountData(db *gorm.DB, user database.User, email, password string) database.Account {
 	account := database.Account{
 		UserID: user.ID,
 	}
@@ -116,7 +132,7 @@ func SetupAccountData(user database.User, email, password string) database.Accou
 	}
 	account.Password = database.ToNullString(string(hashedPassword))
 
-	if err := DB.Save(&account).Error; err != nil {
+	if err := db.Save(&account).Error; err != nil {
 		panic(errors.Wrap(err, "Failed to prepare account"))
 	}
 
@@ -124,31 +140,17 @@ func SetupAccountData(user database.User, email, password string) database.Accou
 }
 
 // SetupSession creates and returns a new user session
-func SetupSession(t *testing.T, user database.User) database.Session {
+func SetupSession(db *gorm.DB, user database.User) database.Session {
 	session := database.Session{
 		Key:       "Vvgm3eBXfXGEFWERI7faiRJ3DAzJw+7DdT9J1LEyNfI=",
 		UserID:    user.ID,
 		ExpiresAt: time.Now().Add(time.Hour * 24),
 	}
-	if err := DB.Save(&session).Error; err != nil {
-		t.Fatal(errors.Wrap(err, "Failed to prepare user"))
+	if err := db.Save(&session).Error; err != nil {
+		panic(errors.Wrap(err, "Failed to prepare user"))
 	}
 
 	return session
-}
-
-// SetupEmailPreferenceData creates and returns a new email frequency for a user
-func SetupEmailPreferenceData(user database.User, inactiveReminder bool) database.EmailPreference {
-	frequency := database.EmailPreference{
-		UserID:           user.ID,
-		InactiveReminder: inactiveReminder,
-	}
-
-	if err := DB.Save(&frequency).Error; err != nil {
-		panic(errors.Wrap(err, "Failed to prepare email frequency"))
-	}
-
-	return frequency
 }
 
 // HTTPDo makes an HTTP request and returns a response
@@ -170,8 +172,8 @@ func HTTPDo(t *testing.T, req *http.Request) *http.Response {
 	return res
 }
 
-// SetReqAuthHeader sets the authorization header in the given request for the given user
-func SetReqAuthHeader(t *testing.T, req *http.Request, user database.User) {
+// SetReqAuthHeader sets the authorization header in the given request for the given user with a specific DB
+func SetReqAuthHeader(t *testing.T, db *gorm.DB, req *http.Request, user database.User) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		t.Fatal(errors.Wrap(err, "reading random bits"))
@@ -182,19 +184,18 @@ func SetReqAuthHeader(t *testing.T, req *http.Request, user database.User) {
 		UserID:    user.ID,
 		ExpiresAt: time.Now().Add(time.Hour * 10 * 24),
 	}
-	if err := DB.Save(&session).Error; err != nil {
+	if err := db.Save(&session).Error; err != nil {
 		t.Fatal(errors.Wrap(err, "Failed to prepare user"))
 	}
 
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", session.Key))
 }
 
-// HTTPAuthDo makes an HTTP request with an appropriate authorization header for a user
-func HTTPAuthDo(t *testing.T, req *http.Request, user database.User) *http.Response {
-	SetReqAuthHeader(t, req, user)
+// HTTPAuthDo makes an HTTP request with an appropriate authorization header for a user with a specific DB
+func HTTPAuthDo(t *testing.T, db *gorm.DB, req *http.Request, user database.User) *http.Response {
+	SetReqAuthHeader(t, db, req, user)
 
 	return HTTPDo(t, req)
-
 }
 
 // MakeReq makes an HTTP request and returns a response

@@ -19,9 +19,11 @@
 package database
 
 import (
-	"github.com/dnote/dnote/pkg/server/config"
+	"os"
+	"path/filepath"
+
 	"github.com/pkg/errors"
-	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -32,18 +34,12 @@ var (
 
 // InitSchema migrates database schema to reflect the latest model definition
 func InitSchema(db *gorm.DB) {
-	if err := db.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`).Error; err != nil {
-		panic(err)
-	}
-
 	if err := db.AutoMigrate(
 		&User{},
 		&Account{},
 		&Book{},
 		&Note{},
-		&Notification{},
 		&Token{},
-		&EmailPreference{},
 		&Session{},
 	); err != nil {
 		panic(err)
@@ -51,8 +47,14 @@ func InitSchema(db *gorm.DB) {
 }
 
 // Open initializes the database connection
-func Open(c config.Config) *gorm.DB {
-	db, err := gorm.Open(postgres.Open(c.DB.GetConnectionStr()), &gorm.Config{})
+func Open(dbPath string) *gorm.DB {
+	// Create directory if it doesn't exist
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		panic(errors.Wrapf(err, "creating database directory at %s", dir))
+	}
+
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
 	if err != nil {
 		panic(errors.Wrap(err, "opening database conection"))
 	}

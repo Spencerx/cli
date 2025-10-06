@@ -22,11 +22,11 @@ import (
 	"errors"
 
 	"github.com/dnote/dnote/pkg/server/database"
+	"github.com/dnote/dnote/pkg/server/helpers"
 	"github.com/dnote/dnote/pkg/server/log"
-	"github.com/dnote/dnote/pkg/server/token"
-	"gorm.io/gorm"
 	pkgErrors "github.com/pkg/errors"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 // TouchLastLoginAt updates the last login timestamp
@@ -34,17 +34,6 @@ func (a *App) TouchLastLoginAt(user database.User, tx *gorm.DB) error {
 	t := a.Clock.Now()
 	if err := tx.Model(&user).Update("last_login_at", &t).Error; err != nil {
 		return pkgErrors.Wrap(err, "updating last_login_at")
-	}
-
-	return nil
-}
-
-func createEmailPreference(user database.User, tx *gorm.DB) error {
-	p := database.EmailPreference{
-		UserID: user.ID,
-	}
-	if err := tx.Save(&p).Error; err != nil {
-		return pkgErrors.Wrap(err, "inserting email preference")
 	}
 
 	return nil
@@ -80,16 +69,14 @@ func (a *App) CreateUser(email, password string, passwordConfirmation string) (d
 		return database.User{}, pkgErrors.Wrap(err, "hashing password")
 	}
 
-	// Grant all privileges if self-hosting
-	var pro bool
-	if a.Config.OnPremises {
-		pro = true
-	} else {
-		pro = false
+	uuid, err := helpers.GenUUID()
+	if err != nil {
+		tx.Rollback()
+		return database.User{}, pkgErrors.Wrap(err, "generating UUID")
 	}
 
 	user := database.User{
-		Cloud: pro,
+		UUID: uuid,
 	}
 	if err = tx.Save(&user).Error; err != nil {
 		tx.Rollback()
@@ -105,14 +92,6 @@ func (a *App) CreateUser(email, password string, passwordConfirmation string) (d
 		return database.User{}, pkgErrors.Wrap(err, "saving account")
 	}
 
-	if _, err := token.Create(tx, user.ID, database.TokenTypeEmailPreference); err != nil {
-		tx.Rollback()
-		return database.User{}, pkgErrors.Wrap(err, "creating email verificaiton token")
-	}
-	if err := createEmailPreference(user, tx); err != nil {
-		tx.Rollback()
-		return database.User{}, pkgErrors.Wrap(err, "creating email preference")
-	}
 	if err := a.TouchLastLoginAt(user, tx); err != nil {
 		tx.Rollback()
 		return database.User{}, pkgErrors.Wrap(err, "updating last login")

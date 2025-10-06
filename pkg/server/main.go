@@ -21,8 +21,8 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
+	"os"
 
 	"github.com/dnote/dnote/pkg/clock"
 	"github.com/dnote/dnote/pkg/server/app"
@@ -30,54 +30,81 @@ import (
 	"github.com/dnote/dnote/pkg/server/config"
 	"github.com/dnote/dnote/pkg/server/controllers"
 	"github.com/dnote/dnote/pkg/server/database"
-	"github.com/dnote/dnote/pkg/server/job"
+	"github.com/dnote/dnote/pkg/server/log"
 	"github.com/dnote/dnote/pkg/server/mailer"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-
 	"github.com/pkg/errors"
+	"gorm.io/gorm"
 )
 
-var port = flag.String("port", "3000", "port to connect to")
-
-func initDB(c config.Config) *gorm.DB {
-	db, err := gorm.Open(postgres.Open(c.DB.GetConnectionStr()), &gorm.Config{})
-	if err != nil {
-		panic(errors.Wrap(err, "opening database connection"))
-	}
+func initDB(dbPath string) *gorm.DB {
+	db := database.Open(dbPath)
 	database.InitSchema(db)
+	database.Migrate(db)
 
 	return db
 }
 
 func initApp(cfg config.Config) app.App {
-	db := initDB(cfg)
+	db := initDB(cfg.DBPath)
+
+	emailBackend, err := mailer.NewDefaultBackend(cfg.IsProd())
+	if err != nil {
+		emailBackend = &mailer.DefaultBackend{Enabled: false}
+	} else {
+		log.Info("Email backend configured")
+	}
 
 	return app.App{
-		DB:             db,
-		Clock:          clock.New(),
-		EmailTemplates: mailer.NewTemplates(),
-		EmailBackend:   &mailer.SimpleBackendImplementation{},
-		Config:         cfg,
-		HTTP500Page:    cfg.HTTP500Page,
+		DB:                  db,
+		Clock:               clock.New(),
+		EmailTemplates:      mailer.NewTemplates(),
+		EmailBackend:        emailBackend,
+		HTTP500Page:         cfg.HTTP500Page,
+		AppEnv:              cfg.AppEnv,
+		WebURL:              cfg.WebURL,
+		DisableRegistration: cfg.DisableRegistration,
+		Port:                cfg.Port,
+		DBPath:              cfg.DBPath,
+		AssetBaseURL:        cfg.AssetBaseURL,
 	}
 }
 
-func runJob(a app.App) error {
-	runner, err := job.NewRunner(a.DB, a.Clock, a.EmailTemplates, a.EmailBackend, a.Config)
+func startCmd(args []string) {
+	startFlags := flag.NewFlagSet("start", flag.ExitOnError)
+	startFlags.Usage = func() {
+		fmt.Printf(`Usage:
+  dnote-server start [flags]
+
+Flags:
+`)
+		startFlags.PrintDefaults()
+	}
+
+	appEnv := startFlags.String("appEnv", "", "Application environment (env: APP_ENV, default: PRODUCTION)")
+	port := startFlags.String("port", "", "Server port (env: PORT, default: 3000)")
+	webURL := startFlags.String("webUrl", "", "Full URL to server without trailing slash (env: WebURL, example: https://example.com)")
+	dbPath := startFlags.String("dbPath", "", "Path to SQLite database file (env: DBPath, default: $XDG_DATA_HOME/dnote/server.db)")
+	disableRegistration := startFlags.Bool("disableRegistration", false, "Disable user registration (env: DisableRegistration, default: false)")
+	logLevel := startFlags.String("logLevel", "", "Log level: debug, info, warn, or error (env: LOG_LEVEL, default: info)")
+
+	startFlags.Parse(args)
+
+	cfg, err := config.New(config.Params{
+		AppEnv:              *appEnv,
+		Port:                *port,
+		WebURL:              *webURL,
+		DBPath:              *dbPath,
+		DisableRegistration: *disableRegistration,
+		LogLevel:            *logLevel,
+	})
 	if err != nil {
-		return errors.Wrap(err, "getting a job runner")
-	}
-	if err := runner.Do(); err != nil {
-		return errors.Wrap(err, "running job")
+		fmt.Printf("Error: %s\n\n", err)
+		startFlags.Usage()
+		os.Exit(1)
 	}
 
-	return nil
-}
-
-func startCmd() {
-	cfg := config.Load()
-	cfg.SetAssetBaseURL("/static")
+	// Set log level
+	log.SetLevel(cfg.LogLevel)
 
 	app := initApp(cfg)
 	defer func() {
@@ -86,13 +113,6 @@ func startCmd() {
 			sqlDB.Close()
 		}
 	}()
-
-	if err := database.Migrate(app.DB); err != nil {
-		panic(errors.Wrap(err, "running migrations"))
-	}
-	if err := runJob(app); err != nil {
-		panic(errors.Wrap(err, "running job"))
-	}
 
 	ctl := controllers.New(&app)
 	rc := controllers.RouteConfig{
@@ -106,8 +126,15 @@ func startCmd() {
 		panic(errors.Wrap(err, "initializing router"))
 	}
 
-	log.Printf("Dnote version %s is running on port %s", buildinfo.Version, *port)
-	log.Fatalln(http.ListenAndServe(fmt.Sprintf(":%s", *port), r))
+	log.WithFields(log.Fields{
+		"version": buildinfo.Version,
+		"port":    cfg.Port,
+	}).Info("Dnote server starting")
+
+	if err := http.ListenAndServe(fmt.Sprintf(":%s", cfg.Port), r); err != nil {
+		log.ErrorWrap(err, "server failed")
+		os.Exit(1)
+	}
 }
 
 func versionCmd() {
@@ -115,29 +142,33 @@ func versionCmd() {
 }
 
 func rootCmd() {
-	fmt.Printf(`Dnote server - a simple personal knowledge base
+	fmt.Printf(`Dnote server - a simple command line notebook
 
 Usage:
-  dnote-server [command]
+  dnote-server [command] [flags]
 
 Available commands:
-  start: Start the server
+  start: Start the server (use 'dnote-server start --help' for flags)
   version: Print the version
 `)
 }
 
 func main() {
-	flag.Parse()
-	cmd := flag.Arg(0)
+	if len(os.Args) < 2 {
+		rootCmd()
+		return
+	}
+
+	cmd := os.Args[1]
 
 	switch cmd {
-	case "":
-		rootCmd()
 	case "start":
-		startCmd()
+		startCmd(os.Args[2:])
 	case "version":
 		versionCmd()
 	default:
-		fmt.Printf("Unknown command %s", cmd)
+		fmt.Printf("Unknown command %s\n", cmd)
+		rootCmd()
+		os.Exit(1)
 	}
 }

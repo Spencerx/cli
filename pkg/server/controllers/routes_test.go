@@ -25,7 +25,6 @@ import (
 	"github.com/dnote/dnote/pkg/assert"
 	"github.com/dnote/dnote/pkg/clock"
 	"github.com/dnote/dnote/pkg/server/app"
-	"github.com/dnote/dnote/pkg/server/config"
 	"github.com/dnote/dnote/pkg/server/testutils"
 )
 
@@ -56,10 +55,11 @@ func TestNotSupportedVersions(t *testing.T) {
 	}
 
 	// setup
-	server := MustNewServer(t, &app.App{
-		Clock:  clock.NewMock(),
-		Config: config.Config{},
-	})
+	db := testutils.InitMemoryDB(t)
+	a := app.NewTest()
+	a.Clock = clock.NewMock()
+	a.DB = db
+	server := MustNewServer(t, &a)
 	defer server.Close()
 
 	for _, tc := range testCases {

@@ -19,149 +19,94 @@
 package config
 
 import (
-	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 
+	"github.com/dnote/dnote/pkg/dirs"
 	"github.com/dnote/dnote/pkg/server/assets"
-	"github.com/dnote/dnote/pkg/server/log"
 	"github.com/pkg/errors"
 )
 
 const (
 	// AppEnvProduction represents an app environment for production.
 	AppEnvProduction string = "PRODUCTION"
+	// DefaultDBDir is the default directory name for Dnote data
+	DefaultDBDir = "dnote"
+	// DefaultDBFilename is the default database filename
+	DefaultDBFilename = "server.db"
 )
 
 var (
-	// ErrDBMissingHost is an error for an incomplete configuration missing the host
-	ErrDBMissingHost = errors.New("DB Host is empty")
-	// ErrDBMissingPort is an error for an incomplete configuration missing the port
-	ErrDBMissingPort = errors.New("DB Port is empty")
-	// ErrDBMissingName is an error for an incomplete configuration missing the name
-	ErrDBMissingName = errors.New("DB Name is empty")
-	// ErrDBMissingUser is an error for an incomplete configuration missing the user
-	ErrDBMissingUser = errors.New("DB User is empty")
+	// DefaultDBPath is the default path to the database file
+	DefaultDBPath = filepath.Join(dirs.DataHome, DefaultDBDir, DefaultDBFilename)
+)
+
+var (
+	// ErrDBMissingPath is an error for an incomplete configuration missing the database path
+	ErrDBMissingPath = errors.New("DB Path is empty")
 	// ErrWebURLInvalid is an error for an incomplete configuration with invalid web url
 	ErrWebURLInvalid = errors.New("Invalid WebURL")
 	// ErrPortInvalid is an error for an incomplete configuration with invalid port
 	ErrPortInvalid = errors.New("Invalid Port")
 )
 
-// PostgresConfig holds the postgres connection configuration.
-type PostgresConfig struct {
-	SSLMode  string
-	Host     string
-	Port     string
-	Name     string
-	User     string
-	Password string
-}
-
 func readBoolEnv(name string) bool {
-	if os.Getenv(name) == "true" {
-		return true
-	}
-
-	return false
+	return os.Getenv(name) == "true"
 }
 
-// checkSSLMode checks if SSL is required for the database connection
-func checkSSLMode() bool {
-	// TODO: deprecate DB_NOSSL in favor of DBSkipSSL
-	if os.Getenv("DB_NOSSL") != "" {
-		return true
+// getOrEnv returns value if non-empty, otherwise env var, otherwise default
+func getOrEnv(value, envKey, defaultVal string) string {
+	if value != "" {
+		return value
 	}
-
-	if os.Getenv("DBSkipSSL") == "true" {
-		return true
+	if env := os.Getenv(envKey); env != "" {
+		return env
 	}
-
-	return os.Getenv("GO_ENV") != "PRODUCTION"
-}
-
-func loadDBConfig() PostgresConfig {
-	var sslmode string
-	if checkSSLMode() {
-		sslmode = "disable"
-	} else {
-		sslmode = "require"
-	}
-
-	return PostgresConfig{
-		SSLMode:  sslmode,
-		Host:     os.Getenv("DBHost"),
-		Port:     os.Getenv("DBPort"),
-		Name:     os.Getenv("DBName"),
-		User:     os.Getenv("DBUser"),
-		Password: os.Getenv("DBPassword"),
-	}
+	return defaultVal
 }
 
 // Config is an application configuration
 type Config struct {
 	AppEnv              string
 	WebURL              string
-	OnPremises          bool
 	DisableRegistration bool
 	Port                string
-	DB                  PostgresConfig
+	DBPath              string
 	AssetBaseURL        string
 	HTTP500Page         []byte
+	LogLevel            string
 }
 
-func getAppEnv() string {
-	// DEPRECATED
-	goEnv := os.Getenv("GO_ENV")
-	if goEnv != "" {
-		return goEnv
-	}
-
-	return os.Getenv("APP_ENV")
+// Params are the configuration parameters for creating a new Config
+type Params struct {
+	AppEnv              string
+	Port                string
+	WebURL              string
+	DBPath              string
+	DisableRegistration bool
+	LogLevel            string
 }
 
-func checkDeprecatedEnvVars() {
-	if os.Getenv("OnPremise") != "" {
-
-		log.WithFields(log.Fields{}).Warn("Environment variable 'OnPremise' is deprecated. Please use OnPremises.")
-	}
-}
-
-// Load constructs and returns a new config based on the environment variables.
-func Load() Config {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "3000"
-	}
-
-	checkDeprecatedEnvVars()
-
+// New constructs and returns a new validated config.
+// Empty string params will fall back to environment variables and defaults.
+func New(p Params) (Config, error) {
 	c := Config{
-		AppEnv:              getAppEnv(),
-		WebURL:              os.Getenv("WebURL"),
-		Port:                port,
-		OnPremises:          readBoolEnv("OnPremise") || readBoolEnv("OnPremises"),
-		DisableRegistration: readBoolEnv("DisableRegistration"),
-		DB:                  loadDBConfig(),
-		AssetBaseURL:        "",
+		AppEnv:              getOrEnv(p.AppEnv, "APP_ENV", AppEnvProduction),
+		Port:                getOrEnv(p.Port, "PORT", "3000"),
+		WebURL:              getOrEnv(p.WebURL, "WebURL", ""),
+		DBPath:              getOrEnv(p.DBPath, "DBPath", DefaultDBPath),
+		DisableRegistration: p.DisableRegistration || readBoolEnv("DisableRegistration"),
+		LogLevel:            getOrEnv(p.LogLevel, "LOG_LEVEL", "info"),
+		AssetBaseURL:        "/static",
 		HTTP500Page:         assets.MustGetHTTP500ErrorPage(),
 	}
 
 	if err := validate(c); err != nil {
-		panic(err)
+		return Config{}, err
 	}
 
-	return c
-}
-
-// SetOnPremises sets the OnPremise value
-func (c *Config) SetOnPremises(val bool) {
-	c.OnPremises = val
-}
-
-// SetAssetBaseURL sets static dir for the confi
-func (c *Config) SetAssetBaseURL(d string) {
-	c.AssetBaseURL = d
+	return c, nil
 }
 
 // IsProd checks if the app environment is configured to be production.
@@ -171,31 +116,15 @@ func (c Config) IsProd() bool {
 
 func validate(c Config) error {
 	if _, err := url.ParseRequestURI(c.WebURL); err != nil {
-		return errors.Wrapf(ErrWebURLInvalid, "provided: '%s'", c.WebURL)
+		return errors.Wrapf(ErrWebURLInvalid, "'%s'", c.WebURL)
 	}
 	if c.Port == "" {
 		return ErrPortInvalid
 	}
 
-	if c.DB.Host == "" {
-		return ErrDBMissingHost
-	}
-	if c.DB.Port == "" {
-		return ErrDBMissingPort
-	}
-	if c.DB.Name == "" {
-		return ErrDBMissingName
-	}
-	if c.DB.User == "" {
-		return ErrDBMissingUser
+	if c.DBPath == "" {
+		return ErrDBMissingPath
 	}
 
 	return nil
-}
-
-// GetConnectionStr returns a postgres connection string.
-func (c PostgresConfig) GetConnectionStr() string {
-	return fmt.Sprintf(
-		"sslmode=%s host=%s port=%s dbname=%s user=%s password=%s",
-		c.SSLMode, c.Host, c.Port, c.Name, c.User, c.Password)
 }

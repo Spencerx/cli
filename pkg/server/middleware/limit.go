@@ -80,7 +80,7 @@ func cleanupVisitors() {
 		mtx.Lock()
 
 		for identifier, v := range visitors {
-			if time.Now().Sub(v.lastSeen) > 3*time.Minute {
+			if time.Since(v.lastSeen) > 3*time.Minute {
 				delete(visitors, identifier)
 			}
 		}
@@ -128,7 +128,7 @@ func Limit(next http.Handler) http.HandlerFunc {
 func ApplyLimit(h http.HandlerFunc, rateLimit bool) http.Handler {
 	ret := h
 
-	if rateLimit && os.Getenv("GO_ENV") != "TEST" {
+	if rateLimit && os.Getenv("APP_ENV") != "TEST" {
 		ret = Limit(ret)
 	}
 
