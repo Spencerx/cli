@@ -1,14 +1,9 @@
-version: "3"
-
 services:
   dnote:
     image: dnote/dnote:latest
-    environment:
-      APP_ENV: PRODUCTION
-      WebURL: localhost:3000
-      DisableRegistration: "false"
+    container_name: dnote
     ports:
-      - 3000:3000
+      - 3001:3001
     volumes:
       - ./dnote_data:/data
-    restart: always
+    restart: unless-stopped
