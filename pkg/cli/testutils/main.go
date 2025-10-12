@@ -20,6 +20,7 @@
 package testutils
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -36,6 +37,16 @@ import (
 	"github.com/dnote/dnote/pkg/cli/utils"
 	"github.com/pkg/errors"
 )
+
+// Prompts for user input
+const (
+	PromptRemoveNote  = "remove this note?"
+	PromptDeleteBook  = "delete book"
+	PromptEmptyServer = "The server is empty but you have local data"
+)
+
+// Timeout for waiting for prompts in tests
+const promptTimeout = 10 * time.Second
 
 // Login simulates a logged in user by inserting credentials in the local database
 func Login(t *testing.T, ctx *context.DnoteCtx) {
@@ -153,58 +164,167 @@ func RunDnoteCmd(t *testing.T, opts RunDnoteCmdOptions, binaryName string, arg .
 	t.Logf("\n%s", stdout)
 }
 
-// WaitDnoteCmd runs a dnote command and waits until the command is exited
-func WaitDnoteCmd(t *testing.T, opts RunDnoteCmdOptions, runFunc func(io.WriteCloser) error, binaryName string, arg ...string) {
+// WaitDnoteCmd runs a dnote command and passes stdout to the callback.
+func WaitDnoteCmd(t *testing.T, opts RunDnoteCmdOptions, runFunc func(io.Reader, io.WriteCloser) error, binaryName string, arg ...string) (string, error) {
 	t.Logf("running: %s %s", binaryName, strings.Join(arg, " "))
 
-	cmd, stderr, stdout, err := NewDnoteCmd(opts, binaryName, arg...)
+	binaryPath, err := filepath.Abs(binaryName)
 	if err != nil {
-		t.Logf("\n%s", stdout)
-		t.Fatal(errors.Wrap(err, "getting command").Error())
+		return "", errors.Wrap(err, "getting absolute path to test binary")
+	}
+
+	cmd := exec.Command(binaryPath, arg...)
+	cmd.Env = opts.Env
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", errors.Wrap(err, "getting stdout pipe")
 	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		t.Logf("\n%s", stdout)
-		t.Fatal(errors.Wrap(err, "getting stdin %s"))
+		return "", errors.Wrap(err, "getting stdin")
 	}
 	defer stdin.Close()
 
-	// Start the program
-	err = cmd.Start()
-	if err != nil {
-		t.Logf("\n%s", stdout)
-		t.Fatal(errors.Wrap(err, "starting command"))
+	if err = cmd.Start(); err != nil {
+		return "", errors.Wrap(err, "starting command")
 	}
 
-	err = runFunc(stdin)
+	var output bytes.Buffer
+	tee := io.TeeReader(stdout, &output)
+
+	err = runFunc(tee, stdin)
 	if err != nil {
-		t.Logf("\n%s", stdout)
-		t.Fatal(errors.Wrap(err, "running with stdin"))
+		t.Logf("\n%s", output.String())
+		return output.String(), errors.Wrap(err, "running callback")
 	}
 
-	err = cmd.Wait()
-	if err != nil {
-		t.Logf("\n%s", stdout)
-		t.Fatal(errors.Wrapf(err, "running command %s", stderr.String()))
+	io.Copy(&output, stdout)
+
+	if err := cmd.Wait(); err != nil {
+		t.Logf("\n%s", output.String())
+		return output.String(), errors.Wrapf(err, "command failed: %s", stderr.String())
 	}
 
-	// Print stdout if and only if test fails later
-	t.Logf("\n%s", stdout)
+	t.Logf("\n%s", output.String())
+	return output.String(), nil
 }
 
-// UserConfirm simulates confirmation from the user by writing to stdin
-func UserConfirm(stdin io.WriteCloser) error {
-	// confirm
-	if _, err := io.WriteString(stdin, "y\n"); err != nil {
-		return errors.Wrap(err, "indicating confirmation in stdin")
+func MustWaitDnoteCmd(t *testing.T, opts RunDnoteCmdOptions, runFunc func(io.Reader, io.WriteCloser) error, binaryName string, arg ...string) string {
+	output, err := WaitDnoteCmd(t, opts, runFunc, binaryName, arg...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return output
+}
+
+// waitForPrompt waits for an expected prompt to appear in stdout with a timeout.
+// Returns an error if the prompt is not found within the timeout period.
+// Handles prompts with or without newlines by reading character by character.
+func waitForPrompt(stdout io.Reader, expectedPrompt string, timeout time.Duration) error {
+	type result struct {
+		found bool
+		err   error
+	}
+	resultCh := make(chan result, 1)
+
+	go func() {
+		reader := bufio.NewReader(stdout)
+		var buffer strings.Builder
+		found := false
+
+		for {
+			b, err := reader.ReadByte()
+			if err != nil {
+				resultCh <- result{found: found, err: err}
+				return
+			}
+
+			buffer.WriteByte(b)
+			if strings.Contains(buffer.String(), expectedPrompt) {
+				found = true
+				break
+			}
+		}
+
+		resultCh <- result{found: found, err: nil}
+	}()
+
+	select {
+	case res := <-resultCh:
+		if res.err != nil && res.err != io.EOF {
+			return errors.Wrap(res.err, "reading stdout")
+		}
+		if !res.found {
+			return errors.Errorf("expected prompt '%s' not found in stdout", expectedPrompt)
+		}
+		return nil
+	case <-time.After(timeout):
+		return errors.Errorf("timeout waiting for prompt '%s'", expectedPrompt)
+	}
+}
+
+// MustWaitForPrompt waits for an expected prompt with a default timeout.
+// Fails the test if the prompt is not found or an error occurs.
+func MustWaitForPrompt(t *testing.T, stdout io.Reader, expectedPrompt string) {
+	if err := waitForPrompt(stdout, expectedPrompt, promptTimeout); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// userRespondToPrompt is a helper that waits for a prompt and sends a response.
+func userRespondToPrompt(stdout io.Reader, stdin io.WriteCloser, expectedPrompt, response, action string) error {
+	if err := waitForPrompt(stdout, expectedPrompt, promptTimeout); err != nil {
+		return err
+	}
+
+	if _, err := io.WriteString(stdin, response); err != nil {
+		return errors.Wrapf(err, "indicating %s in stdin", action)
 	}
 
 	return nil
 }
 
-// UserContent simulates content from the user by writing to stdin
-func UserContent(stdin io.WriteCloser) error {
+// userConfirmOutput simulates confirmation from the user by writing to stdin.
+// It waits for the expected prompt with a timeout to prevent deadlocks.
+func userConfirmOutput(stdout io.Reader, stdin io.WriteCloser, expectedPrompt string) error {
+	return userRespondToPrompt(stdout, stdin, expectedPrompt, "y\n", "confirmation")
+}
+
+// userCancelOutput simulates cancellation from the user by writing to stdin.
+// It waits for the expected prompt with a timeout to prevent deadlocks.
+func userCancelOutput(stdout io.Reader, stdin io.WriteCloser, expectedPrompt string) error {
+	return userRespondToPrompt(stdout, stdin, expectedPrompt, "n\n", "cancellation")
+}
+
+// ConfirmRemoveNote waits for prompt for removing a note and confirms.
+func ConfirmRemoveNote(stdout io.Reader, stdin io.WriteCloser) error {
+	return userConfirmOutput(stdout, stdin, PromptRemoveNote)
+}
+
+// ConfirmRemoveBook waits for prompt for deleting a book confirms.
+func ConfirmRemoveBook(stdout io.Reader, stdin io.WriteCloser) error {
+	return userConfirmOutput(stdout, stdin, PromptDeleteBook)
+}
+
+// UserConfirmEmptyServerSync waits for an empty server prompt and confirms.
+func UserConfirmEmptyServerSync(stdout io.Reader, stdin io.WriteCloser) error {
+	return userConfirmOutput(stdout, stdin, PromptEmptyServer)
+}
+
+// UserCancelEmptyServerSync waits for an empty server prompt and confirms.
+func UserCancelEmptyServerSync(stdout io.Reader, stdin io.WriteCloser) error {
+	return userCancelOutput(stdout, stdin, PromptEmptyServer)
+}
+
+// UserContent simulates content from the user by writing to stdin.
+// This is used for piped input where no prompt is shown.
+func UserContent(stdout io.Reader, stdin io.WriteCloser) error {
 	longText := `Lorem ipsum dolor sit amet, consectetur adipiscing elit,
 	sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.`
 

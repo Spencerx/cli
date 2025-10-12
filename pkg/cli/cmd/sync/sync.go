@@ -29,6 +29,7 @@ import (
 	"github.com/dnote/dnote/pkg/cli/infra"
 	"github.com/dnote/dnote/pkg/cli/log"
 	"github.com/dnote/dnote/pkg/cli/migrate"
+	"github.com/dnote/dnote/pkg/cli/ui"
 	"github.com/dnote/dnote/pkg/cli/upgrade"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -629,6 +630,20 @@ func stepSync(ctx context.DnoteCtx, tx *database.DB, afterUSN int) error {
 	return nil
 }
 
+// isConflictError checks if an error is a 409 Conflict error from the server
+func isConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var httpErr *client.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.IsConflict()
+	}
+
+	return false
+}
+
 func sendBooks(ctx context.DnoteCtx, tx *database.DB) (bool, error) {
 	isBehind := false
 
@@ -661,6 +676,12 @@ func sendBooks(ctx context.DnoteCtx, tx *database.DB) (bool, error) {
 			} else {
 				resp, err := client.CreateBook(ctx, book.Label)
 				if err != nil {
+					// If we get a 409 conflict, it means another client uploaded data.
+					if isConflictError(err) {
+						log.Debug("409 conflict creating book %s, will retry after sync\n", book.Label)
+						isBehind = true
+						continue
+					}
 					return isBehind, errors.Wrap(err, "creating a book")
 				}
 
@@ -766,7 +787,10 @@ func sendNotes(ctx context.DnoteCtx, tx *database.DB) (bool, error) {
 			} else {
 				resp, err := client.CreateNote(ctx, note.BookUUID, note.Body)
 				if err != nil {
-					return isBehind, errors.Wrap(err, "creating a note")
+					// If we get a 409 conflict, it means another client uploaded data.
+					log.Debug("error creating note (will retry after sync): %v\n", err)
+					isBehind = true
+					continue
 				}
 
 				note.Dirty = false
@@ -885,6 +909,26 @@ func saveSyncState(tx *database.DB, serverTime int64, serverMaxUSN int) error {
 	return nil
 }
 
+// prepareEmptyServerSync marks all local books and notes as dirty when syncing to an empty server.
+// This is typically used when switching to a new empty server but wanting to upload existing local data.
+// Returns true if preparation was done, false otherwise.
+func prepareEmptyServerSync(tx *database.DB) error {
+	// Mark all books and notes as dirty and reset USN to 0
+	if _, err := tx.Exec("UPDATE books SET usn = 0, dirty = 1 WHERE deleted = 0"); err != nil {
+		return errors.Wrap(err, "marking books as dirty")
+	}
+	if _, err := tx.Exec("UPDATE notes SET usn = 0, dirty = 1 WHERE deleted = 0"); err != nil {
+		return errors.Wrap(err, "marking notes as dirty")
+	}
+
+	// Reset lastMaxUSN to 0 to match the server
+	if err := updateLastMaxUSN(tx, 0); err != nil {
+		return errors.Wrap(err, "resetting last max usn")
+	}
+
+	return nil
+}
+
 func newRun(ctx context.DnoteCtx) infra.RunEFunc {
 	return func(cmd *cobra.Command, args []string) error {
 		if ctx.SessionKey == "" {
@@ -914,6 +958,52 @@ func newRun(ctx context.DnoteCtx) infra.RunEFunc {
 		}
 
 		log.Debug("lastSyncAt: %d, lastMaxUSN: %d, syncState: %+v\n", lastSyncAt, lastMaxUSN, syncState)
+
+		// Handle a case where server has MaxUSN=0 but local has data (server switch)
+		var bookCount, noteCount int
+		if err := tx.QueryRow("SELECT count(*) FROM books WHERE deleted = 0").Scan(&bookCount); err != nil {
+			return errors.Wrap(err, "counting local books")
+		}
+		if err := tx.QueryRow("SELECT count(*) FROM notes WHERE deleted = 0").Scan(&noteCount); err != nil {
+			return errors.Wrap(err, "counting local notes")
+		}
+
+		// If a client has previously synced (lastMaxUSN > 0) but the server was never synced to (MaxUSN = 0),
+		// and the client has undeleted books or notes, allow to upload all data to the server.
+		// The client might have switched servers or the server might need to be restored for any reasons.
+		if syncState.MaxUSN == 0 && lastMaxUSN > 0 && (bookCount > 0 || noteCount > 0) {
+			log.Debug("empty server detected: server.MaxUSN=%d, local.MaxUSN=%d, books=%d, notes=%d\n",
+				syncState.MaxUSN, lastMaxUSN, bookCount, noteCount)
+
+			log.Warnf("The server is empty but you have local data. Maybe you switched servers?\n")
+			log.Debug("server state: MaxUSN = 0 (empty)\n")
+			log.Debug("local state: %d books, %d notes (MaxUSN = %d)\n", bookCount, noteCount, lastMaxUSN)
+
+			confirmed, err := ui.Confirm(fmt.Sprintf("Upload %d books and %d notes to the server?", bookCount, noteCount), false)
+			if err != nil {
+				tx.Rollback()
+				return errors.Wrap(err, "getting user confirmation")
+			}
+
+			if !confirmed {
+				tx.Rollback()
+				return errors.New("sync cancelled by user")
+			}
+
+			fmt.Println() // Add newline after confirmation.
+
+			if err := prepareEmptyServerSync(tx); err != nil {
+				return errors.Wrap(err, "preparing for empty server sync")
+			}
+
+			// Re-fetch lastMaxUSN after prepareEmptyServerSync
+			lastMaxUSN, err = getLastMaxUSN(tx)
+			if err != nil {
+				return errors.Wrap(err, "getting the last max_usn after prepare")
+			}
+
+			log.Debug("prepared empty server sync: marked %d books and %d notes as dirty\n", bookCount, noteCount)
+		}
 
 		var syncErr error
 		if isFullSync || lastSyncAt < syncState.FullSyncBefore {
@@ -952,6 +1042,14 @@ func newRun(ctx context.DnoteCtx) infra.RunEFunc {
 			if err != nil {
 				tx.Rollback()
 				return errors.Wrap(err, "performing the follow-up step sync")
+			}
+
+			// After syncing server changes (which resolves conflicts), send local changes again
+			// This uploads books/notes that were skipped due to 409 conflicts
+			_, err = sendChanges(ctx, tx)
+			if err != nil {
+				tx.Rollback()
+				return errors.Wrap(err, "sending changes after conflict resolution")
 			}
 		}
 
