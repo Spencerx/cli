@@ -46,16 +46,12 @@ var apiEndpoint string
 var versionTag = "master"
 
 func main() {
-	// Parse flags early to check if --api-endpoint was provided
+	// Parse flags early to get --dbPath before initializing database
 	root.GetRoot().ParseFlags(os.Args[1:])
+	dbPath := root.GetDBPathFlag()
 
-	// Use flag value if provided, otherwise use ldflags value
-	endpoint := apiEndpoint
-	if flagValue := root.GetAPIEndpointFlag(); flagValue != "" {
-		endpoint = flagValue
-	}
-
-	ctx, err := infra.Init(versionTag, endpoint)
+	// Initialize context - defaultAPIEndpoint is used when creating new config file
+	ctx, err := infra.Init(versionTag, apiEndpoint, dbPath)
 	if err != nil {
 		panic(errors.Wrap(err, "initializing context"))
 	}

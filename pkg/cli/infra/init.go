@@ -42,6 +42,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	// DefaultAPIEndpoint is the default API endpoint used when none is configured
+	DefaultAPIEndpoint = "http://localhost:3001/api"
+)
+
 // RunEFunc is a function type of dnote commands
 type RunEFunc func(*cobra.Command, []string) error
 
@@ -59,7 +64,12 @@ func checkLegacyDBPath() (string, bool) {
 	return "", false
 }
 
-func getDBPath(paths context.Paths) string {
+func getDBPath(paths context.Paths, customPath string) string {
+	// If custom path is provided, use it
+	if customPath != "" {
+		return customPath
+	}
+
 	legacyDnoteDir, ok := checkLegacyDBPath()
 	if ok {
 		return fmt.Sprintf("%s/%s", legacyDnoteDir, consts.DnoteDBFileName)
@@ -71,7 +81,7 @@ func getDBPath(paths context.Paths) string {
 // newBaseCtx creates a minimal context with paths and database connection.
 // This base context is used for file and database initialization before
 // being enriched with config values by setupCtx.
-func newBaseCtx(versionTag string) (context.DnoteCtx, error) {
+func newBaseCtx(versionTag, customDBPath string) (context.DnoteCtx, error) {
 	dnoteDir := getLegacyDnotePath(dirs.Home)
 	paths := context.Paths{
 		Home:        dirs.Home,
@@ -81,7 +91,7 @@ func newBaseCtx(versionTag string) (context.DnoteCtx, error) {
 		LegacyDnote: dnoteDir,
 	}
 
-	dbPath := getDBPath(paths)
+	dbPath := getDBPath(paths, customDBPath)
 
 	db, err := database.Open(dbPath)
 	if err != nil {
@@ -98,13 +108,14 @@ func newBaseCtx(versionTag string) (context.DnoteCtx, error) {
 }
 
 // Init initializes the Dnote environment and returns a new dnote context
-func Init(versionTag, apiEndpoint string) (*context.DnoteCtx, error) {
-	ctx, err := newBaseCtx(versionTag)
+// apiEndpoint is used when creating a new config file (e.g., from ldflags during tests)
+func Init(versionTag, apiEndpoint, dbPath string) (*context.DnoteCtx, error) {
+	ctx, err := newBaseCtx(versionTag, dbPath)
 	if err != nil {
 		return nil, errors.Wrap(err, "initializing a context")
 	}
 
-	if err := InitFiles(ctx, apiEndpoint); err != nil {
+	if err := initFiles(ctx, apiEndpoint); err != nil {
 		return nil, errors.Wrap(err, "initializing files")
 	}
 
@@ -122,7 +133,7 @@ func Init(versionTag, apiEndpoint string) (*context.DnoteCtx, error) {
 		return nil, errors.Wrap(err, "running migration")
 	}
 
-	ctx, err = setupCtx(ctx, apiEndpoint)
+	ctx, err = setupCtx(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "setting up the context")
 	}
@@ -134,8 +145,7 @@ func Init(versionTag, apiEndpoint string) (*context.DnoteCtx, error) {
 
 // setupCtx enriches the base context with values from config file and database.
 // This is called after files and database have been initialized.
-// If apiEndpoint is provided, it overrides the value from config.
-func setupCtx(ctx context.DnoteCtx, apiEndpoint string) (context.DnoteCtx, error) {
+func setupCtx(ctx context.DnoteCtx) (context.DnoteCtx, error) {
 	db := ctx.DB
 
 	var sessionKey string
@@ -155,19 +165,13 @@ func setupCtx(ctx context.DnoteCtx, apiEndpoint string) (context.DnoteCtx, error
 		return ctx, errors.Wrap(err, "reading config")
 	}
 
-	// Use override if provided, otherwise use config value
-	endpoint := cf.APIEndpoint
-	if apiEndpoint != "" {
-		endpoint = apiEndpoint
-	}
-
 	ret := context.DnoteCtx{
 		Paths:              ctx.Paths,
 		Version:            ctx.Version,
 		DB:                 ctx.DB,
 		SessionKey:         sessionKey,
 		SessionKeyExpiry:   sessionKeyExpiry,
-		APIEndpoint:        endpoint,
+		APIEndpoint:        cf.APIEndpoint,
 		Editor:             cf.Editor,
 		Clock:              clock.New(),
 		EnableUpgradeCheck: cf.EnableUpgradeCheck,
@@ -367,9 +371,15 @@ func initConfigFile(ctx context.DnoteCtx, apiEndpoint string) error {
 
 	editor := getEditorCommand()
 
+	// Use default API endpoint if none provided
+	endpoint := apiEndpoint
+	if endpoint == "" {
+		endpoint = DefaultAPIEndpoint
+	}
+
 	cf := config.Config{
 		Editor:             editor,
-		APIEndpoint:        apiEndpoint,
+		APIEndpoint:        endpoint,
 		EnableUpgradeCheck: true,
 	}
 
@@ -380,8 +390,8 @@ func initConfigFile(ctx context.DnoteCtx, apiEndpoint string) error {
 	return nil
 }
 
-// InitFiles creates, if necessary, the dnote directory and files inside
-func InitFiles(ctx context.DnoteCtx, apiEndpoint string) error {
+// initFiles creates, if necessary, the dnote directory and files inside
+func initFiles(ctx context.DnoteCtx, apiEndpoint string) error {
 	if err := initDnoteDir(ctx); err != nil {
 		return errors.Wrap(err, "creating the dnote dir")
 	}
