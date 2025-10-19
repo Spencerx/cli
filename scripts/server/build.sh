@@ -74,3 +74,6 @@ go install src.techknowlogick.com/xgo@latest
 
 build linux amd64
 build linux arm64
+build linux arm
+build linux 386
+build freebsd amd64
