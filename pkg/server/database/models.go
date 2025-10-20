@@ -40,7 +40,6 @@ type Book struct {
 	EditedOn  int64  `json:"edited_on"`
 	USN       int    `json:"-" gorm:"index"`
 	Deleted   bool   `json:"-" gorm:"default:false"`
-	Encrypted bool   `json:"-" gorm:"default:false"`
 }
 
 // Note is a model for a note
@@ -54,10 +53,8 @@ type Note struct {
 	Body      string `json:"content"`
 	AddedOn   int64  `json:"added_on"`
 	EditedOn  int64  `json:"edited_on"`
-	Public    bool   `json:"public" gorm:"default:false"`
 	USN       int    `json:"-" gorm:"index"`
 	Deleted   bool   `json:"-" gorm:"default:false"`
-	Encrypted bool   `json:"-" gorm:"default:false"`
 	Client    string `gorm:"index"`
 }
 

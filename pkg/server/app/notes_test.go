@@ -91,7 +91,7 @@ func TestCreateNote(t *testing.T) {
 			a.DB = db
 			a.Clock = mockClock
 
-			if _, err := a.CreateNote(user, b1.UUID, "note content", tc.addedOn, tc.editedOn, false, ""); err != nil {
+			if _, err := a.CreateNote(user, b1.UUID, "note content", tc.addedOn, tc.editedOn, ""); err != nil {
 				t.Fatal(errors.Wrapf(err, "creating note for test case %d", idx))
 			}
 
@@ -139,7 +139,7 @@ func TestCreateNote_EmptyBody(t *testing.T) {
 	a.Clock = clock.NewMock()
 
 	// Create note with empty body
-	note, err := a.CreateNote(user, b1.UUID, "", nil, nil, false, "")
+	note, err := a.CreateNote(user, b1.UUID, "", nil, nil, "")
 	if err != nil {
 		t.Fatal(errors.Wrap(err, "creating note with empty body"))
 	}
@@ -188,7 +188,6 @@ func TestUpdateNote(t *testing.T) {
 
 			c := clock.NewMock()
 			content := "updated test content"
-			public := true
 
 			a := NewTest()
 			a.DB = db
@@ -197,7 +196,6 @@ func TestUpdateNote(t *testing.T) {
 			tx := db.Begin()
 			if _, err := a.UpdateNote(tx, user, note, &UpdateNoteParams{
 				Content: &content,
-				Public:  &public,
 			}); err != nil {
 				tx.Rollback()
 				t.Fatal(errors.Wrap(err, "updating note"))
@@ -218,7 +216,6 @@ func TestUpdateNote(t *testing.T) {
 			assert.Equal(t, noteCount, int64(1), "note count mismatch")
 			assert.Equal(t, noteRecord.UserID, user.ID, "note UserID mismatch")
 			assert.Equal(t, noteRecord.Body, content, "note Body mismatch")
-			assert.Equal(t, noteRecord.Public, public, "note Public mismatch")
 			assert.Equal(t, noteRecord.Deleted, false, "note Deleted mismatch")
 			assert.Equal(t, noteRecord.USN, expectedUSN, "note USN mismatch")
 			assert.Equal(t, userRecord.MaxUSN, expectedUSN, "user MaxUSN mismatch")
@@ -374,10 +371,9 @@ func TestGetNotes_FTSSearch(t *testing.T) {
 
 	// Search "baz"
 	result, err := a.GetNotes(user.ID, GetNotesParams{
-		Search:    "baz",
-		Encrypted: false,
-		Page:      1,
-		PerPage:   30,
+		Search:  "baz",
+		Page:    1,
+		PerPage: 30,
 	})
 	if err != nil {
 		t.Fatal(errors.Wrap(err, "getting notes with FTS search"))
@@ -390,10 +386,9 @@ func TestGetNotes_FTSSearch(t *testing.T) {
 
 	// Search for "running" - should return 1 note
 	result, err = a.GetNotes(user.ID, GetNotesParams{
-		Search:    "running",
-		Encrypted: false,
-		Page:      1,
-		PerPage:   30,
+		Search:  "running",
+		Page:    1,
+		PerPage: 30,
 	})
 	if err != nil {
 		t.Fatal(errors.Wrap(err, "getting notes with FTS search for review"))
@@ -405,10 +400,9 @@ func TestGetNotes_FTSSearch(t *testing.T) {
 
 	// Search for non-existent term - should return 0 notes
 	result, err = a.GetNotes(user.ID, GetNotesParams{
-		Search:    "nonexistent",
-		Encrypted: false,
-		Page:      1,
-		PerPage:   30,
+		Search:  "nonexistent",
+		Page:    1,
+		PerPage: 30,
 	})
 	if err != nil {
 		t.Fatal(errors.Wrap(err, "getting notes with FTS search for nonexistent"))
@@ -437,10 +431,9 @@ func TestGetNotes_FTSSearch_Snippet(t *testing.T) {
 
 	// Search for "keyword" in long note - should return snippet with "..."
 	result, err := a.GetNotes(user.ID, GetNotesParams{
-		Search:    "keyword",
-		Encrypted: false,
-		Page:      1,
-		PerPage:   30,
+		Search:  "keyword",
+		Page:    1,
+		PerPage: 30,
 	})
 	if err != nil {
 		t.Fatal(errors.Wrap(err, "getting notes with FTS search for keyword"))
@@ -472,10 +465,9 @@ func TestGetNotes_FTSSearch_ShortWord(t *testing.T) {
 	a.Clock = clock.NewMock()
 
 	result, err := a.GetNotes(user.ID, GetNotesParams{
-		Search:    "a",
-		Encrypted: false,
-		Page:      1,
-		PerPage:   30,
+		Search:  "a",
+		Page:    1,
+		PerPage: 30,
 	})
 	if err != nil {
 		t.Fatal(errors.Wrap(err, "getting notes with FTS search for 'a'"))
@@ -504,10 +496,9 @@ func TestGetNotes_All(t *testing.T) {
 	a.Clock = clock.NewMock()
 
 	result, err := a.GetNotes(user.ID, GetNotesParams{
-		Search:    "",
-		Encrypted: false,
-		Page:      1,
-		PerPage:   30,
+		Search:  "",
+		Page:    1,
+		PerPage: 30,
 	})
 	if err != nil {
 		t.Fatal(errors.Wrap(err, "getting notes with FTS search for 'a'"))
