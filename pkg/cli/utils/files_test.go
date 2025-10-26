@@ -16,20 +16,30 @@
  * along with Dnote.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-package sync
+package utils
 
 import (
-	"github.com/dnote/dnote/pkg/cli/context"
+	"os"
 	"path/filepath"
+	"testing"
+
+	"github.com/dnote/dnote/pkg/assert"
 )
 
-var testDir = "../../tmp"
+func TestEnsureDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	testPath := filepath.Join(tmpDir, "test", "nested", "dir")
 
-var paths context.Paths = context.Paths{
-	Home:   testDir,
-	Cache:  testDir,
-	Config: testDir,
-	Data:   testDir,
+	// Create directory
+	err := EnsureDir(testPath)
+	assert.Equal(t, err, nil, "EnsureDir should succeed")
+
+	// Verify it exists
+	info, err := os.Stat(testPath)
+	assert.Equal(t, err, nil, "directory should exist")
+	assert.Equal(t, info.IsDir(), true, "should be a directory")
+
+	// Call again on existing directory - should not error
+	err = EnsureDir(testPath)
+	assert.Equal(t, err, nil, "EnsureDir should succeed on existing directory")
 }
-
-var dbPath = filepath.Join(testDir, "test.db")
